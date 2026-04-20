@@ -87,67 +87,67 @@ def transcribe_status(job_id):
     else:
         return jsonify({'status': 'processing'})
 
+def get_youtube_captions(video_id):
+    """Fetch auto-generated captions from YouTube"""
+    try:
+        # Get video page to find caption track
+        url = f'https://www.youtube.com/watch?v={video_id}'
+        resp = requests.get(url, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }, timeout=15)
+
+        # Find caption URL in page source
+        import re
+        # Look for timedtext URL
+        match = re.search(r'"captionTracks":\[{"baseUrl":"([^"]+)"', resp.text)
+        if not match:
+            return None
+
+        caption_url = match.group(1).replace('\u0026', '&')
+        print(f'Caption URL found: {caption_url[:80]}')
+
+        # Fetch captions
+        cap_resp = requests.get(caption_url, timeout=15)
+        
+        # Parse XML captions
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(cap_resp.text)
+        
+        texts = []
+        for text in root.findall('.//text'):
+            t = text.text
+            if t:
+                # Clean HTML entities
+                t = t.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&#39;', "'").replace('&quot;', '"')
+                texts.append(t.strip())
+        
+        transcript = ' '.join(texts)
+        print(f'Captions extracted: {len(transcript)} chars')
+        return transcript
+
+    except Exception as e:
+        print(f'Caption fetch error: {e}')
+        return None
+
 def do_transcription(job_id, video_url, cookies):
     try:
-        if not ASSEMBLYAI_API_KEY:
-            jobs[job_id] = {'status': 'error', 'error': 'No AssemblyAI key configured'}
+        # Extract video ID
+        import re
+        vid_match = re.search(r'(?:v=|youtu\.be/)([a-zA-Z0-9_-]{11})', video_url)
+        if not vid_match:
+            jobs[job_id] = {'status': 'error', 'error': 'Could not extract video ID'}
             return
 
-        # Use AssemblyAI v3 API which supports YouTube URLs directly
-        print(f'Submitting to AssemblyAI v3: {video_url}')
+        video_id = vid_match.group(1)
+        print(f'Getting captions for video: {video_id}')
 
-        headers = {
-            'authorization': ASSEMBLYAI_API_KEY,
-            'content-type': 'application/json'
-        }
+        transcript = get_youtube_captions(video_id)
 
-        # Submit transcript request
-        transcript_response = requests.post(
-            'https://api.assemblyai.com/v2/transcript',
-            headers=headers,
-            json={
-                'audio_url': video_url,
-                'language_code': 'en',
-                'punctuate': True,
-                'format_text': True
-            }
-        )
-
-        print(f'AssemblyAI v3 status code: {transcript_response.status_code}')
-        print(f'AssemblyAI v3 raw response: {transcript_response.text[:300]}')
-
-        if not transcript_response.text:
-            jobs[job_id] = {'status': 'error', 'error': 'AssemblyAI returned empty response, status: ' + str(transcript_response.status_code)}
-            return
-
-        resp_json = transcript_response.json()
-        print(f'AssemblyAI v3 response: {resp_json}')
-
-        if 'id' not in resp_json:
-            jobs[job_id] = {'status': 'error', 'error': 'AssemblyAI rejected: ' + str(resp_json.get('error', str(resp_json)))}
-            return
-
-        transcript_id = resp_json['id']
-        print(f'Transcript ID: {transcript_id}')
-
-        # Poll for completion
-        for i in range(40):
-            time.sleep(3)
-            poll = requests.get(
-                f'https://api.assemblyai.com/v2/transcript/{transcript_id}',
-                headers=headers
-            ).json()
-
-            print(f'Poll {i+1}: {poll.get("status")}')
-
-            if poll.get('status') == 'completed':
-                jobs[job_id] = {'status': 'done', 'transcript': poll.get('text', '')}
-                return
-            elif poll.get('status') == 'error':
-                jobs[job_id] = {'status': 'error', 'error': 'AssemblyAI error: ' + poll.get('error', 'unknown')}
-                return
-
-        jobs[job_id] = {'status': 'error', 'error': 'Transcription timed out'}
+        if transcript and len(transcript) > 100:
+            print(f'Got transcript via captions: {transcript[:100]}')
+            jobs[job_id] = {'status': 'done', 'transcript': transcript}
+        else:
+            jobs[job_id] = {'status': 'error', 'error': 'No captions available for this video'}
 
     except Exception as e:
         print(f'Transcription error: {e}')
