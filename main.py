@@ -1,18 +1,13 @@
-# v3
+# v4
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
-import json
 import re
-import requests
-import time
 import threading
 import uuid
 
 app = Flask(__name__)
 CORS(app)
-
-ASSEMBLYAI_API_KEY = os.environ.get('ASSEMBLYAI_API_KEY', '') or '6ebcaec19ec14b90a91a1371f0a50c7f'
 
 jobs = {}
 
@@ -68,10 +63,21 @@ def do_transcription(job_id, video_url):
         print(f'Getting transcript for: {video_id}')
 
         from youtube_transcript_api import YouTubeTranscriptApi
-        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['en', 'en-US', 'en-GB', 'en-AU'])
-        transcript = ' '.join([t['text'] for t in transcript_list])
+        
+        # Try new API style first, fall back to old
+        try:
+            ytt = YouTubeTranscriptApi()
+            fetched = ytt.fetch(video_id)
+            transcript = ' '.join([t.text for t in fetched])
+        except Exception:
+            # Old API style
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            transcript_obj = transcript_list.find_transcript(['en', 'en-US', 'en-GB', 'en-AU'])
+            fetched = transcript_obj.fetch()
+            transcript = ' '.join([t['text'] for t in fetched])
+
         print(f'Transcript length: {len(transcript)} chars')
-        print(f'Transcript preview: {transcript[:200]}')
+        print(f'Preview: {transcript[:150]}')
 
         if len(transcript) > 50:
             jobs[job_id] = {'status': 'done', 'transcript': transcript}
