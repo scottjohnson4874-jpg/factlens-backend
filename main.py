@@ -79,102 +79,51 @@ def transcribe_status(job_id):
 
 def do_transcription(job_id, video_url, cookies):
     try:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            audio_path = os.path.join(tmpdir, 'audio.mp3')
-            is_youtube = 'youtube.com' in video_url or 'youtu.be' in video_url
+        if not ASSEMBLYAI_API_KEY:
+            jobs[job_id] = {'status': 'error', 'error': 'No AssemblyAI key configured'}
+            return
 
-            if is_youtube:
-                # Use pytubefix for YouTube — bypasses bot detection
-                print(f'Using pytubefix for YouTube: {video_url}')
-                try:
-                    from pytubefix import YouTube
-                    from pytubefix.cli import on_progress
+        # Submit YouTube URL directly to AssemblyAI — no downloading needed
+        print(f'Submitting to AssemblyAI directly: {video_url}')
 
-                    yt = YouTube(video_url, on_progress_callback=on_progress, use_oauth=False, allow_oauth_cache=False)
-                    audio_stream = yt.streams.filter(only_audio=True).first()
+        transcript_response = requests.post(
+            'https://api.assemblyai.com/v2/transcript',
+            headers={'authorization': ASSEMBLYAI_API_KEY, 'content-type': 'application/json'},
+            json={
+                'audio_url': video_url,
+                'language_code': 'en',
+                'punctuate': True
+            }
+        )
 
-                    if not audio_stream:
-                        raise Exception('No audio stream found')
+        resp_json = transcript_response.json()
+        print(f'AssemblyAI response: {resp_json}')
 
-                    # Download to tmpdir
-                    out_file = audio_stream.download(output_path=tmpdir, filename='audio_raw')
-                    
-                    # Convert to mp3 using ffmpeg
-                    convert_result = subprocess.run([
-                        'ffmpeg', '-i', out_file, '-vn', '-acodec', 'libmp3lame', '-q:a', '5', audio_path
-                    ], capture_output=True, text=True, timeout=60)
+        if 'id' not in resp_json:
+            jobs[job_id] = {'status': 'error', 'error': 'AssemblyAI rejected URL: ' + str(resp_json.get('error', 'unknown'))}
+            return
 
-                    if not os.path.exists(audio_path):
-                        # Try without conversion
-                        audio_path = out_file
+        transcript_id = resp_json['id']
+        print(f'Transcription started: {transcript_id}')
 
-                    print(f'pytubefix download successful: {os.path.getsize(audio_path)} bytes')
+        # Poll for completion
+        for i in range(40):
+            time.sleep(3)
+            poll = requests.get(
+                f'https://api.assemblyai.com/v2/transcript/{transcript_id}',
+                headers={'authorization': ASSEMBLYAI_API_KEY}
+            ).json()
 
-                except Exception as e:
-                    print(f'pytubefix failed: {e}, trying yt-dlp fallback')
-                    # Fallback to yt-dlp
-                    _download_with_ytdlp(video_url, audio_path, tmpdir, cookies)
+            print(f'Poll {i+1}: {poll["status"]}')
 
-            else:
-                # Non-YouTube: use yt-dlp (works well for Facebook etc)
-                _download_with_ytdlp(video_url, audio_path, tmpdir, cookies)
-
-            # Find the audio file
-            actual_path = audio_path
-            if not os.path.exists(actual_path):
-                for f in os.listdir(tmpdir):
-                    if any(f.endswith(ext) for ext in ['.mp3', '.m4a', '.webm', '.mp4', '.ogg']):
-                        actual_path = os.path.join(tmpdir, f)
-                        break
-
-            if not os.path.exists(actual_path):
-                jobs[job_id] = {'status': 'error', 'error': 'Audio file not found after download'}
+            if poll['status'] == 'completed':
+                jobs[job_id] = {'status': 'done', 'transcript': poll['text']}
+                return
+            elif poll['status'] == 'error':
+                jobs[job_id] = {'status': 'error', 'error': 'AssemblyAI error: ' + poll.get('error', 'unknown')}
                 return
 
-            print(f'Audio ready: {os.path.getsize(actual_path)} bytes')
-
-            if not ASSEMBLYAI_API_KEY:
-                jobs[job_id] = {'status': 'error', 'error': 'No AssemblyAI key configured'}
-                return
-
-            # Upload to AssemblyAI
-            with open(actual_path, 'rb') as f:
-                upload_response = requests.post(
-                    'https://api.assemblyai.com/v2/upload',
-                    headers={'authorization': ASSEMBLYAI_API_KEY},
-                    data=f
-                )
-
-            upload_url = upload_response.json()['upload_url']
-            print(f'Uploaded to AssemblyAI: {upload_url}')
-
-            # Request transcription
-            transcript_response = requests.post(
-                'https://api.assemblyai.com/v2/transcript',
-                headers={'authorization': ASSEMBLYAI_API_KEY, 'content-type': 'application/json'},
-                json={'audio_url': upload_url, 'language_code': 'en', 'punctuate': True}
-            )
-            transcript_id = transcript_response.json()['id']
-            print(f'Transcription started: {transcript_id}')
-
-            # Poll AssemblyAI
-            for i in range(40):
-                time.sleep(3)
-                poll = requests.get(
-                    f'https://api.assemblyai.com/v2/transcript/{transcript_id}',
-                    headers={'authorization': ASSEMBLYAI_API_KEY}
-                ).json()
-
-                print(f'Poll {i+1}: {poll["status"]}')
-
-                if poll['status'] == 'completed':
-                    jobs[job_id] = {'status': 'done', 'transcript': poll['text']}
-                    return
-                elif poll['status'] == 'error':
-                    jobs[job_id] = {'status': 'error', 'error': 'AssemblyAI transcription failed'}
-                    return
-
-            jobs[job_id] = {'status': 'error', 'error': 'Transcription timed out'}
+        jobs[job_id] = {'status': 'error', 'error': 'Transcription timed out'}
 
     except Exception as e:
         print(f'Transcription error: {e}')
