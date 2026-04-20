@@ -1,4 +1,4 @@
-# v5
+# v6
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
@@ -13,12 +13,7 @@ jobs = {}
 
 @app.route('/health', methods=['GET'])
 def health():
-    try:
-        import youtube_transcript_api
-        version = getattr(youtube_transcript_api, '__version__', 'unknown')
-    except:
-        version = 'not installed'
-    return jsonify({'status': 'ok', 'service': 'FactLens Backend', 'yta_version': version})
+    return jsonify({'status': 'ok', 'service': 'FactLens Backend'})
 
 @app.route('/transcribe/start', methods=['POST'])
 def transcribe_start():
@@ -67,17 +62,23 @@ def do_transcription(job_id, video_url):
         video_id = vid_match.group(1)
         print(f'Getting transcript for: {video_id}')
 
-        import youtube_transcript_api as yta
-        print(f'YTA version: {getattr(yta, "__version__", "unknown")}')
-        print(f'YTA dir: {[x for x in dir(yta) if not x.startswith("_")]}')
+        from youtube_transcript_api import YouTubeTranscriptApi
+        
+        # New API: YouTubeTranscriptApi().fetch(video_id)
+        ytt_api = YouTubeTranscriptApi()
+        fetched = ytt_api.fetch(video_id)
+        transcript = ' '.join([snippet.text for snippet in fetched])
 
-        api = yta.YouTubeTranscriptApi
-        print(f'API methods: {[x for x in dir(api) if not x.startswith("_")]}')
+        print(f'Transcript length: {len(transcript)} chars')
+        print(f'Preview: {transcript[:150]}')
 
-        jobs[job_id] = {'status': 'error', 'error': 'Debug: check Railway logs for API methods'}
+        if len(transcript) > 50:
+            jobs[job_id] = {'status': 'done', 'transcript': transcript}
+        else:
+            jobs[job_id] = {'status': 'error', 'error': 'Transcript too short'}
 
     except Exception as e:
-        print(f'Error: {e}')
+        print(f'Transcription error: {e}')
         jobs[job_id] = {'status': 'error', 'error': str(e)}
 
 if __name__ == '__main__':
