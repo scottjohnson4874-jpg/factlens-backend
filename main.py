@@ -31,6 +31,7 @@ def transcribe():
         with tempfile.TemporaryDirectory() as tmpdir:
             audio_path = os.path.join(tmpdir, 'audio.mp3')
 
+            # Updated yt-dlp command with YouTube-specific fixes
             result = subprocess.run([
                 'yt-dlp',
                 '--extract-audio',
@@ -39,48 +40,77 @@ def transcribe():
                 '--output', audio_path,
                 '--no-playlist',
                 '--socket-timeout', '30',
-                '--max-filesize', '10m',
+                '--max-filesize', '15m',
+                '--no-check-certificates',
+                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                '--extractor-args', 'youtube:player_client=web,web_creator',
+                '--no-warnings',
                 video_url
-            ], capture_output=True, text=True, timeout=60)
+            ], capture_output=True, text=True, timeout=90)
 
+            print('yt-dlp stdout:', result.stdout[:200])
+            print('yt-dlp stderr:', result.stderr[:200])
+            print('yt-dlp returncode:', result.returncode)
+
+            # Find the downloaded file
             actual_path = audio_path
             if not os.path.exists(actual_path):
                 for f in os.listdir(tmpdir):
-                    if f.endswith(('.mp3', '.m4a', '.webm')):
+                    if f.endswith(('.mp3', '.m4a', '.webm', '.opus')):
                         actual_path = os.path.join(tmpdir, f)
                         break
 
             if not os.path.exists(actual_path):
-                return jsonify({'error': 'Could not download video audio'}), 400
+                error_msg = result.stderr[:300] if result.stderr else 'Unknown download error'
+                return jsonify({'error': 'Could not download video: ' + error_msg}), 400
+
+            print('Audio file size:', os.path.getsize(actual_path))
 
             if not ASSEMBLYAI_API_KEY:
                 return jsonify({'error': 'AssemblyAI API key not configured'}), 500
 
+            # Upload to AssemblyAI
             with open(actual_path, 'rb') as f:
                 upload_response = requests.post(
                     'https://api.assemblyai.com/v2/upload',
                     headers={'authorization': ASSEMBLYAI_API_KEY},
                     data=f
                 )
+
+            if upload_response.status_code != 200:
+                return jsonify({'error': 'Upload failed: ' + str(upload_response.status_code)}), 500
+
             upload_url = upload_response.json()['upload_url']
 
+            # Request transcription
             transcript_response = requests.post(
                 'https://api.assemblyai.com/v2/transcript',
-                headers={'authorization': ASSEMBLYAI_API_KEY, 'content-type': 'application/json'},
-                json={'audio_url': upload_url, 'language_code': 'en'}
+                headers={
+                    'authorization': ASSEMBLYAI_API_KEY,
+                    'content-type': 'application/json'
+                },
+                json={
+                    'audio_url': upload_url,
+                    'language_code': 'en',
+                    'punctuate': True,
+                    'format_text': True
+                }
             )
+
             transcript_id = transcript_response.json()['id']
 
-            for _ in range(30):
+            # Poll for completion
+            for _ in range(40):
                 time.sleep(3)
                 poll = requests.get(
                     f'https://api.assemblyai.com/v2/transcript/{transcript_id}',
                     headers={'authorization': ASSEMBLYAI_API_KEY}
                 ).json()
+
                 if poll['status'] == 'completed':
                     return jsonify({'transcript': poll['text']})
                 elif poll['status'] == 'error':
-                    return jsonify({'error': 'Transcription failed'}), 500
+                    return jsonify({'error': 'Transcription failed: ' + poll.get('error', 'unknown')}), 500
 
             return jsonify({'error': 'Transcription timed out'}), 408
 
@@ -99,14 +129,26 @@ def factcheck():
         if not text:
             return jsonify({'error': 'No text provided'}), 400
 
-        clean = text[:1000]
+        clean = text[:1500]
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-        prompt = 'You are FactLens, an AI fact-checker. Analyse this text and return ONLY valid JSON.\n\nText: "' + clean + '"\n\nReturn exactly this JSON:\n{"verdict":{"type":"false","emoji":"cross","label":"FALSE","summary":"one sentence verdict"},"claims":[{"status":"bad","quote":"specific claim","explanation":"two sentence explanation.","confidence":85}],"aiGenerated":{"detected":false,"confidence":50}}\n\nVERDICT RULES:\n- true: claim is accurate and supported by evidence\n- false: claim is demonstrably wrong with clear evidence\n- misleading: contains truth but framed deceptively or omits important context\n- unverified: cannot confirm or deny, specific figures not verifiable\n\nDO NOT use misleading just because a number cannot be verified. Use unverified instead.\nemoji: check/cross/warning/question. status: ok/bad/warn/info. Max 2 claims. Return ONLY the JSON.'
+        prompt = (
+            'You are FactLens, an expert fact-checker. Today is April 2026. '
+            'This is a video transcript. Search the web to verify the specific claims made. '
+            'Identify the 2 most misleading or inaccurate claims and explain what is actually true. '
+            'Return ONLY valid JSON, no markdown, no citation tags:\n\n'
+            'Text: "' + clean + '"\n\n'
+            'Return exactly this JSON:\n'
+            '{"verdict":{"type":"misleading","emoji":"warning","label":"MISLEADING","summary":"one plain English sentence"},'
+            '"claims":[{"status":"warn","quote":"specific claim from transcript","explanation":"2 plain sentences of evidence.","confidence":85}],'
+            '"aiGenerated":{"detected":false,"confidence":40}}\n\n'
+            'Types: true=ACCURATE, false=FALSE, misleading=MISLEADING, unverified=NEEDS MORE INFO\n'
+            'emoji: check/cross/warning/question. Max 2 claims. Plain text only, no HTML.'
+        )
 
         response = client.messages.create(
             model='claude-sonnet-4-20250514',
-            max_tokens=600,
+            max_tokens=800,
             tools=[{'type': 'web_search_20250305', 'name': 'web_search'}],
             messages=[{'role': 'user', 'content': prompt}]
         )
@@ -116,7 +158,8 @@ def factcheck():
             if hasattr(block, 'text'):
                 full_text += block.text
 
-        match = re.search(r'\{[\s\S]*\}', full_text)
+        stripped = full_text.replace('```json', '').replace('```', '').strip()
+        match = re.search(r'\{[\s\S]*\}', stripped)
         if not match:
             return jsonify({'error': 'No JSON in response'}), 500
 
