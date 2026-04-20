@@ -24,6 +24,7 @@ def transcribe():
     try:
         data = request.json
         video_url = data.get('url', '')
+        cookies = data.get('cookies', '')  # Optional cookies from browser
 
         if not video_url:
             return jsonify({'error': 'No video URL provided'}), 400
@@ -31,8 +32,8 @@ def transcribe():
         with tempfile.TemporaryDirectory() as tmpdir:
             audio_path = os.path.join(tmpdir, 'audio.mp3')
 
-            # Updated yt-dlp command with YouTube-specific fixes
-            result = subprocess.run([
+            # Base yt-dlp command
+            cmd = [
                 'yt-dlp',
                 '--extract-audio',
                 '--audio-format', 'mp3',
@@ -43,28 +44,39 @@ def transcribe():
                 '--max-filesize', '15m',
                 '--no-check-certificates',
                 '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                '--extractor-args', 'youtube:player_client=web,web_creator',
-                '--no-warnings',
-                video_url
-            ], capture_output=True, text=True, timeout=90)
+            ]
 
-            print('yt-dlp stdout:', result.stdout[:200])
-            print('yt-dlp stderr:', result.stderr[:200])
+            # If cookies provided write to file and use them
+            if cookies:
+                cookies_path = os.path.join(tmpdir, 'cookies.txt')
+                with open(cookies_path, 'w') as f:
+                    f.write(cookies)
+                cmd.extend(['--cookies', cookies_path])
+            else:
+                # Try po_token approach for YouTube
+                cmd.extend([
+                    '--extractor-args', 'youtube:player_client=web,mweb',
+                ])
+
+            cmd.append(video_url)
+
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+
             print('yt-dlp returncode:', result.returncode)
+            print('yt-dlp stderr:', result.stderr[:300])
 
-            # Find the downloaded file
+            # Find downloaded file
             actual_path = audio_path
             if not os.path.exists(actual_path):
                 for f in os.listdir(tmpdir):
-                    if f.endswith(('.mp3', '.m4a', '.webm', '.opus')):
+                    if f.startswith('audio') and f != 'cookies.txt':
                         actual_path = os.path.join(tmpdir, f)
                         break
 
             if not os.path.exists(actual_path):
-                error_msg = result.stderr[:300] if result.stderr else 'Unknown download error'
-                return jsonify({'error': 'Could not download video: ' + error_msg}), 400
+                return jsonify({'error': 'Could not download video: ' + result.stderr[:200]}), 400
 
-            print('Audio file size:', os.path.getsize(actual_path))
+            print('Audio size:', os.path.getsize(actual_path))
 
             if not ASSEMBLYAI_API_KEY:
                 return jsonify({'error': 'AssemblyAI API key not configured'}), 500
@@ -77,24 +89,13 @@ def transcribe():
                     data=f
                 )
 
-            if upload_response.status_code != 200:
-                return jsonify({'error': 'Upload failed: ' + str(upload_response.status_code)}), 500
-
             upload_url = upload_response.json()['upload_url']
 
             # Request transcription
             transcript_response = requests.post(
                 'https://api.assemblyai.com/v2/transcript',
-                headers={
-                    'authorization': ASSEMBLYAI_API_KEY,
-                    'content-type': 'application/json'
-                },
-                json={
-                    'audio_url': upload_url,
-                    'language_code': 'en',
-                    'punctuate': True,
-                    'format_text': True
-                }
+                headers={'authorization': ASSEMBLYAI_API_KEY, 'content-type': 'application/json'},
+                json={'audio_url': upload_url, 'language_code': 'en', 'punctuate': True}
             )
 
             transcript_id = transcript_response.json()['id']
@@ -110,7 +111,7 @@ def transcribe():
                 if poll['status'] == 'completed':
                     return jsonify({'transcript': poll['text']})
                 elif poll['status'] == 'error':
-                    return jsonify({'error': 'Transcription failed: ' + poll.get('error', 'unknown')}), 500
+                    return jsonify({'error': 'Transcription failed'}), 500
 
             return jsonify({'error': 'Transcription timed out'}), 408
 
@@ -134,21 +135,21 @@ def factcheck():
 
         prompt = (
             'You are FactLens, an expert fact-checker. Today is April 2026. '
-            'This is a video transcript. Search the web to verify the specific claims made. '
-            'Identify the 2 most misleading or inaccurate claims and explain what is actually true. '
+            'This is a video transcript. Search the web to verify the specific claims. '
+            'Identify the 2 most misleading or inaccurate claims. '
             'Return ONLY valid JSON, no markdown, no citation tags:\n\n'
             'Text: "' + clean + '"\n\n'
             'Return exactly this JSON:\n'
-            '{"verdict":{"type":"misleading","emoji":"warning","label":"MISLEADING","summary":"one plain English sentence"},'
-            '"claims":[{"status":"warn","quote":"specific claim from transcript","explanation":"2 plain sentences of evidence.","confidence":85}],'
+            '{"verdict":{"type":"misleading","emoji":"warning","label":"MISLEADING","summary":"one plain sentence"},'
+            '"claims":[{"status":"warn","quote":"specific claim","explanation":"2 plain sentences.","confidence":85}],'
             '"aiGenerated":{"detected":false,"confidence":40}}\n\n'
             'Types: true=ACCURATE, false=FALSE, misleading=MISLEADING, unverified=NEEDS MORE INFO\n'
-            'emoji: check/cross/warning/question. Max 2 claims. Plain text only, no HTML.'
+            'emoji: check/cross/warning/question. Max 2 claims. Plain text only.'
         )
 
         response = client.messages.create(
             model='claude-sonnet-4-20250514',
-            max_tokens=800,
+            max_tokens=1000,
             tools=[{'type': 'web_search_20250305', 'name': 'web_search'}],
             messages=[{'role': 'user', 'content': prompt}]
         )
@@ -159,11 +160,12 @@ def factcheck():
                 full_text += block.text
 
         stripped = full_text.replace('```json', '').replace('```', '').strip()
-        match = re.search(r'\{[\s\S]*\}', stripped)
-        if not match:
+        start = stripped.find('{')
+        end = stripped.rfind('}')
+        if start == -1 or end == -1:
             return jsonify({'error': 'No JSON in response'}), 500
 
-        result = json.loads(match.group(0))
+        result = json.loads(stripped[start:end+1])
 
         emoji_map = {'check': '✅', 'cross': '🚫', 'warning': '⚠️', 'question': '🔎'}
         if result.get('verdict'):
