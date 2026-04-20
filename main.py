@@ -8,6 +8,8 @@ import re
 import tempfile
 import requests
 import time
+import threading
+import uuid
 
 app = Flask(__name__)
 CORS(app)
@@ -15,24 +17,63 @@ CORS(app)
 ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
 ASSEMBLYAI_API_KEY = os.environ.get('ASSEMBLYAI_API_KEY', '')
 
+# Store jobs in memory
+jobs = {}
+
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({'status': 'ok', 'service': 'FactLens Backend'})
 
-@app.route('/transcribe', methods=['POST'])
-def transcribe():
+@app.route('/transcribe/start', methods=['POST'])
+def transcribe_start():
+    """Start transcription job and return job ID immediately"""
     try:
         data = request.json
         video_url = data.get('url', '')
-        cookies = data.get('cookies', '')  # Optional cookies from browser
+        cookies = data.get('cookies', '')
 
         if not video_url:
             return jsonify({'error': 'No video URL provided'}), 400
 
+        job_id = str(uuid.uuid4())[:8]
+        jobs[job_id] = {'status': 'processing', 'transcript': None, 'error': None}
+
+        # Start transcription in background thread
+        thread = threading.Thread(target=do_transcription, args=(job_id, video_url, cookies))
+        thread.daemon = True
+        thread.start()
+
+        return jsonify({'job_id': job_id, 'status': 'processing'})
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/transcribe/status/<job_id>', methods=['GET'])
+def transcribe_status(job_id):
+    """Check status of transcription job"""
+    if job_id not in jobs:
+        return jsonify({'error': 'Job not found'}), 404
+
+    job = jobs[job_id]
+
+    if job['status'] == 'done':
+        # Clean up job after returning
+        transcript = job['transcript']
+        del jobs[job_id]
+        return jsonify({'status': 'done', 'transcript': transcript})
+    elif job['status'] == 'error':
+        error = job['error']
+        del jobs[job_id]
+        return jsonify({'status': 'error', 'error': error}), 400
+    else:
+        return jsonify({'status': 'processing'})
+
+def do_transcription(job_id, video_url, cookies):
+    """Run transcription in background thread"""
+    try:
         with tempfile.TemporaryDirectory() as tmpdir:
             audio_path = os.path.join(tmpdir, 'audio.mp3')
 
-            # Base yt-dlp command
             cmd = [
                 'yt-dlp',
                 '--extract-audio',
@@ -43,43 +84,41 @@ def transcribe():
                 '--socket-timeout', '30',
                 '--max-filesize', '15m',
                 '--no-check-certificates',
-                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             ]
 
-            # If cookies provided write to file and use them
             if cookies:
+                # Convert cookie string to Netscape format file
                 cookies_path = os.path.join(tmpdir, 'cookies.txt')
                 with open(cookies_path, 'w') as f:
-                    f.write(cookies)
+                    f.write('# Netscape HTTP Cookie File\n')
+                    for pair in cookies.split('; '):
+                        if '=' in pair:
+                            name, _, value = pair.partition('=')
+                            f.write(f'.youtube.com\tTRUE\t/\tFALSE\t0\t{name.strip()}\t{value.strip()}\n')
                 cmd.extend(['--cookies', cookies_path])
             else:
-                # Try po_token approach for YouTube
-                cmd.extend([
-                    '--extractor-args', 'youtube:player_client=web,mweb',
-                ])
+                cmd.extend(['--extractor-args', 'youtube:player_client=mweb'])
 
             cmd.append(video_url)
 
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
 
-            print('yt-dlp returncode:', result.returncode)
-            print('yt-dlp stderr:', result.stderr[:300])
-
             # Find downloaded file
             actual_path = audio_path
             if not os.path.exists(actual_path):
                 for f in os.listdir(tmpdir):
-                    if f.startswith('audio') and f != 'cookies.txt':
+                    if f.startswith('audio') and not f.endswith('.txt'):
                         actual_path = os.path.join(tmpdir, f)
                         break
 
             if not os.path.exists(actual_path):
-                return jsonify({'error': 'Could not download video: ' + result.stderr[:200]}), 400
-
-            print('Audio size:', os.path.getsize(actual_path))
+                jobs[job_id] = {'status': 'error', 'error': 'Download failed: ' + result.stderr[:150]}
+                return
 
             if not ASSEMBLYAI_API_KEY:
-                return jsonify({'error': 'AssemblyAI API key not configured'}), 500
+                jobs[job_id] = {'status': 'error', 'error': 'No AssemblyAI key'}
+                return
 
             # Upload to AssemblyAI
             with open(actual_path, 'rb') as f:
@@ -88,7 +127,6 @@ def transcribe():
                     headers={'authorization': ASSEMBLYAI_API_KEY},
                     data=f
                 )
-
             upload_url = upload_response.json()['upload_url']
 
             # Request transcription
@@ -97,10 +135,9 @@ def transcribe():
                 headers={'authorization': ASSEMBLYAI_API_KEY, 'content-type': 'application/json'},
                 json={'audio_url': upload_url, 'language_code': 'en', 'punctuate': True}
             )
-
             transcript_id = transcript_response.json()['id']
 
-            # Poll for completion
+            # Poll AssemblyAI
             for _ in range(40):
                 time.sleep(3)
                 poll = requests.get(
@@ -109,16 +146,16 @@ def transcribe():
                 ).json()
 
                 if poll['status'] == 'completed':
-                    return jsonify({'transcript': poll['text']})
+                    jobs[job_id] = {'status': 'done', 'transcript': poll['text']}
+                    return
                 elif poll['status'] == 'error':
-                    return jsonify({'error': 'Transcription failed'}), 500
+                    jobs[job_id] = {'status': 'error', 'error': 'Transcription failed'}
+                    return
 
-            return jsonify({'error': 'Transcription timed out'}), 408
+            jobs[job_id] = {'status': 'error', 'error': 'Transcription timed out'}
 
-    except subprocess.TimeoutExpired:
-        return jsonify({'error': 'Video download timed out'}), 408
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        jobs[job_id] = {'status': 'error', 'error': str(e)}
 
 
 @app.route('/factcheck', methods=['POST'])
@@ -136,7 +173,7 @@ def factcheck():
         prompt = (
             'You are FactLens, an expert fact-checker. Today is April 2026. '
             'This is a video transcript. Search the web to verify the specific claims. '
-            'Identify the 2 most misleading or inaccurate claims. '
+            'Identify the 2 most misleading or inaccurate claims and explain what is actually true. '
             'Return ONLY valid JSON, no markdown, no citation tags:\n\n'
             'Text: "' + clean + '"\n\n'
             'Return exactly this JSON:\n'
