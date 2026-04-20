@@ -98,9 +98,26 @@ def get_youtube_captions(video_id):
 
         # Find caption URL in page source
         import re
-        # Look for timedtext URL
-        match = re.search(r'"captionTracks":\[{"baseUrl":"([^"]+)"', resp.text)
+        # Log what we find
+        print(f'Page length: {len(resp.text)}')
+        print(f'Has captionTracks: {"captionTracks" in resp.text}')
+        print(f'Has timedtext: {"timedtext" in resp.text}')
+
+        # Try multiple patterns
+        patterns = [
+            r'"captionTracks":\[{"baseUrl":"([^"]+)"',
+            r'"baseUrl":"(https://www\.youtube\.com/api/timedtext[^"]+)"',
+            r'(https://www\.youtube\.com/api/timedtext\?[^"\\]+)',
+        ]
+        match = None
+        for p in patterns:
+            match = re.search(p, resp.text)
+            if match:
+                print(f'Matched pattern: {p[:50]}')
+                break
+
         if not match:
+            print(f'No caption match. Page snippet: {resp.text[5000:5200]}')
             return None
 
         caption_url = match.group(1).replace('\u0026', '&')
