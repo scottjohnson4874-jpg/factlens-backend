@@ -15,7 +15,7 @@ app = Flask(__name__)
 CORS(app)
 
 ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
-ASSEMBLYAI_API_KEY = os.environ.get('ASSEMBLYAI_API_KEY', '') or os.environ.get('assemblyai_api_key', '')
+ASSEMBLYAI_API_KEY = os.environ.get('ASSEMBLYAI_API_KEY', '') or os.environ.get('assemblyai_api_key', '') or '6ebcaec19ec14b90a91a1371f0a50c7f'
 
 # Store jobs in memory
 jobs = {}
