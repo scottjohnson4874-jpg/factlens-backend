@@ -1,5 +1,6 @@
 flask
 flask-cors
 anthropic
-yt-dlp
+yt-dlp>=2025.1.1
 requests
+pytubefix
