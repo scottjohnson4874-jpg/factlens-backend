@@ -22,7 +22,12 @@ jobs = {}
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'ok', 'service': 'FactLens Backend'})
+    return jsonify({
+        'status': 'ok',
+        'service': 'FactLens Backend',
+        'assemblyai_key_set': bool(ASSEMBLYAI_API_KEY),
+        'assemblyai_key_length': len(ASSEMBLYAI_API_KEY)
+    })
 
 @app.route('/test-pytubefix', methods=['GET'])
 def test_pytubefix():
