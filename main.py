@@ -24,6 +24,19 @@ jobs = {}
 def health():
     return jsonify({'status': 'ok', 'service': 'FactLens Backend'})
 
+@app.route('/test-pytubefix', methods=['GET'])
+def test_pytubefix():
+    """Test if pytubefix can download a YouTube video"""
+    try:
+        from pytubefix import YouTube
+        url = 'https://www.youtube.com/watch?v=9hzrN-Jb10A'
+        yt = YouTube(url)
+        streams = yt.streams.filter(only_audio=True)
+        stream_info = [{'itag': s.itag, 'mime': s.mime_type, 'abr': s.abr} for s in streams]
+        return jsonify({'status': 'ok', 'title': yt.title, 'streams': stream_info[:3]})
+    except Exception as e:
+        return jsonify({'status': 'error', 'error': str(e)})
+
 @app.route('/transcribe/start', methods=['POST'])
 def transcribe_start():
     try:
