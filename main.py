@@ -1,4 +1,4 @@
-# v4
+# v5
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
@@ -13,7 +13,12 @@ jobs = {}
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'ok', 'service': 'FactLens Backend'})
+    try:
+        import youtube_transcript_api
+        version = getattr(youtube_transcript_api, '__version__', 'unknown')
+    except:
+        version = 'not installed'
+    return jsonify({'status': 'ok', 'service': 'FactLens Backend', 'yta_version': version})
 
 @app.route('/transcribe/start', methods=['POST'])
 def transcribe_start():
@@ -62,30 +67,17 @@ def do_transcription(job_id, video_url):
         video_id = vid_match.group(1)
         print(f'Getting transcript for: {video_id}')
 
-        from youtube_transcript_api import YouTubeTranscriptApi
-        
-        # Try new API style first, fall back to old
-        try:
-            ytt = YouTubeTranscriptApi()
-            fetched = ytt.fetch(video_id)
-            transcript = ' '.join([t.text for t in fetched])
-        except Exception:
-            # Old API style
-            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-            transcript_obj = transcript_list.find_transcript(['en', 'en-US', 'en-GB', 'en-AU'])
-            fetched = transcript_obj.fetch()
-            transcript = ' '.join([t['text'] for t in fetched])
+        import youtube_transcript_api as yta
+        print(f'YTA version: {getattr(yta, "__version__", "unknown")}')
+        print(f'YTA dir: {[x for x in dir(yta) if not x.startswith("_")]}')
 
-        print(f'Transcript length: {len(transcript)} chars')
-        print(f'Preview: {transcript[:150]}')
+        api = yta.YouTubeTranscriptApi
+        print(f'API methods: {[x for x in dir(api) if not x.startswith("_")]}')
 
-        if len(transcript) > 50:
-            jobs[job_id] = {'status': 'done', 'transcript': transcript}
-        else:
-            jobs[job_id] = {'status': 'error', 'error': 'Transcript too short'}
+        jobs[job_id] = {'status': 'error', 'error': 'Debug: check Railway logs for API methods'}
 
     except Exception as e:
-        print(f'Transcription error: {e}')
+        print(f'Error: {e}')
         jobs[job_id] = {'status': 'error', 'error': str(e)}
 
 if __name__ == '__main__':
