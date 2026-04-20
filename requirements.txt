@@ -4,3 +4,4 @@ anthropic
 yt-dlp>=2025.1.1
 requests
 pytubefix
+youtube-transcript-api
