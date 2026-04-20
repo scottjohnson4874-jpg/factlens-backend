@@ -93,43 +93,49 @@ def do_transcription(job_id, video_url, cookies):
             jobs[job_id] = {'status': 'error', 'error': 'No AssemblyAI key configured'}
             return
 
-        # Submit YouTube URL directly to AssemblyAI — no downloading needed
-        print(f'Submitting to AssemblyAI directly: {video_url}')
+        # Use AssemblyAI v3 API which supports YouTube URLs directly
+        print(f'Submitting to AssemblyAI v3: {video_url}')
 
+        headers = {
+            'authorization': ASSEMBLYAI_API_KEY,
+            'content-type': 'application/json'
+        }
+
+        # Submit transcript request
         transcript_response = requests.post(
-            'https://api.assemblyai.com/v2/transcript',
-            headers={'authorization': ASSEMBLYAI_API_KEY, 'content-type': 'application/json'},
+            'https://api.assemblyai.com/v3/transcripts',
+            headers=headers,
             json={
                 'audio_url': video_url,
-                'language_code': 'en',
-                'punctuate': True
+                'speech_model': 'universal-2',
+                'language_code': 'en'
             }
         )
 
         resp_json = transcript_response.json()
-        print(f'AssemblyAI response: {resp_json}')
+        print(f'AssemblyAI v3 response: {resp_json}')
 
         if 'id' not in resp_json:
-            jobs[job_id] = {'status': 'error', 'error': 'AssemblyAI rejected URL: ' + str(resp_json.get('error', 'unknown'))}
+            jobs[job_id] = {'status': 'error', 'error': 'AssemblyAI rejected: ' + str(resp_json.get('error', resp_json))}
             return
 
         transcript_id = resp_json['id']
-        print(f'Transcription started: {transcript_id}')
+        print(f'Transcript ID: {transcript_id}')
 
         # Poll for completion
         for i in range(40):
             time.sleep(3)
             poll = requests.get(
-                f'https://api.assemblyai.com/v2/transcript/{transcript_id}',
-                headers={'authorization': ASSEMBLYAI_API_KEY}
+                f'https://api.assemblyai.com/v3/transcripts/{transcript_id}',
+                headers=headers
             ).json()
 
-            print(f'Poll {i+1}: {poll["status"]}')
+            print(f'Poll {i+1}: {poll.get("status")}')
 
-            if poll['status'] == 'completed':
-                jobs[job_id] = {'status': 'done', 'transcript': poll['text']}
+            if poll.get('status') == 'completed':
+                jobs[job_id] = {'status': 'done', 'transcript': poll.get('text', '')}
                 return
-            elif poll['status'] == 'error':
+            elif poll.get('status') == 'error':
                 jobs[job_id] = {'status': 'error', 'error': 'AssemblyAI error: ' + poll.get('error', 'unknown')}
                 return
 
