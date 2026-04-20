@@ -112,11 +112,18 @@ def do_transcription(job_id, video_url, cookies):
             }
         )
 
+        print(f'AssemblyAI v3 status code: {transcript_response.status_code}')
+        print(f'AssemblyAI v3 raw response: {transcript_response.text[:300]}')
+
+        if not transcript_response.text:
+            jobs[job_id] = {'status': 'error', 'error': 'AssemblyAI returned empty response, status: ' + str(transcript_response.status_code)}
+            return
+
         resp_json = transcript_response.json()
         print(f'AssemblyAI v3 response: {resp_json}')
 
         if 'id' not in resp_json:
-            jobs[job_id] = {'status': 'error', 'error': 'AssemblyAI rejected: ' + str(resp_json.get('error', resp_json))}
+            jobs[job_id] = {'status': 'error', 'error': 'AssemblyAI rejected: ' + str(resp_json.get('error', str(resp_json)))}
             return
 
         transcript_id = resp_json['id']
