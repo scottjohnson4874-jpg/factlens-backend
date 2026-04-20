@@ -26,7 +26,6 @@ def health():
 
 @app.route('/transcribe/start', methods=['POST'])
 def transcribe_start():
-    """Start transcription job and return job ID immediately"""
     try:
         data = request.json
         video_url = data.get('url', '')
@@ -38,7 +37,6 @@ def transcribe_start():
         job_id = str(uuid.uuid4())[:8]
         jobs[job_id] = {'status': 'processing', 'transcript': None, 'error': None}
 
-        # Start transcription in background thread
         thread = threading.Thread(target=do_transcription, args=(job_id, video_url, cookies))
         thread.daemon = True
         thread.start()
@@ -50,14 +48,12 @@ def transcribe_start():
 
 @app.route('/transcribe/status/<job_id>', methods=['GET'])
 def transcribe_status(job_id):
-    """Check status of transcription job"""
     if job_id not in jobs:
         return jsonify({'error': 'Job not found'}), 404
 
     job = jobs[job_id]
 
     if job['status'] == 'done':
-        # Clean up job after returning
         transcript = job['transcript']
         del jobs[job_id]
         return jsonify({'status': 'done', 'transcript': transcript})
@@ -69,55 +65,63 @@ def transcribe_status(job_id):
         return jsonify({'status': 'processing'})
 
 def do_transcription(job_id, video_url, cookies):
-    """Run transcription in background thread"""
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             audio_path = os.path.join(tmpdir, 'audio.mp3')
+            is_youtube = 'youtube.com' in video_url or 'youtu.be' in video_url
 
-            cmd = [
-                'yt-dlp',
-                '--extract-audio',
-                '--audio-format', 'mp3',
-                '--audio-quality', '5',
-                '--output', audio_path,
-                '--no-playlist',
-                '--socket-timeout', '30',
-                '--max-filesize', '15m',
-                '--no-check-certificates',
-                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            ]
+            if is_youtube:
+                # Use pytubefix for YouTube — bypasses bot detection
+                print(f'Using pytubefix for YouTube: {video_url}')
+                try:
+                    from pytubefix import YouTube
+                    from pytubefix.cli import on_progress
 
-            if cookies:
-                # Convert cookie string to Netscape format file
-                cookies_path = os.path.join(tmpdir, 'cookies.txt')
-                with open(cookies_path, 'w') as f:
-                    f.write('# Netscape HTTP Cookie File\n')
-                    for pair in cookies.split('; '):
-                        if '=' in pair:
-                            name, _, value = pair.partition('=')
-                            f.write(f'.youtube.com\tTRUE\t/\tFALSE\t0\t{name.strip()}\t{value.strip()}\n')
-                cmd.extend(['--cookies', cookies_path])
+                    yt = YouTube(video_url, on_progress_callback=on_progress, use_oauth=False, allow_oauth_cache=False)
+                    audio_stream = yt.streams.filter(only_audio=True).first()
+
+                    if not audio_stream:
+                        raise Exception('No audio stream found')
+
+                    # Download to tmpdir
+                    out_file = audio_stream.download(output_path=tmpdir, filename='audio_raw')
+                    
+                    # Convert to mp3 using ffmpeg
+                    convert_result = subprocess.run([
+                        'ffmpeg', '-i', out_file, '-vn', '-acodec', 'libmp3lame', '-q:a', '5', audio_path
+                    ], capture_output=True, text=True, timeout=60)
+
+                    if not os.path.exists(audio_path):
+                        # Try without conversion
+                        audio_path = out_file
+
+                    print(f'pytubefix download successful: {os.path.getsize(audio_path)} bytes')
+
+                except Exception as e:
+                    print(f'pytubefix failed: {e}, trying yt-dlp fallback')
+                    # Fallback to yt-dlp
+                    _download_with_ytdlp(video_url, audio_path, tmpdir, cookies)
+
             else:
-                cmd.extend(['--extractor-args', 'youtube:player_client=mweb'])
+                # Non-YouTube: use yt-dlp (works well for Facebook etc)
+                _download_with_ytdlp(video_url, audio_path, tmpdir, cookies)
 
-            cmd.append(video_url)
-
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
-
-            # Find downloaded file
+            # Find the audio file
             actual_path = audio_path
             if not os.path.exists(actual_path):
                 for f in os.listdir(tmpdir):
-                    if f.startswith('audio') and not f.endswith('.txt'):
+                    if any(f.endswith(ext) for ext in ['.mp3', '.m4a', '.webm', '.mp4', '.ogg']):
                         actual_path = os.path.join(tmpdir, f)
                         break
 
             if not os.path.exists(actual_path):
-                jobs[job_id] = {'status': 'error', 'error': 'Download failed: ' + result.stderr[:150]}
+                jobs[job_id] = {'status': 'error', 'error': 'Audio file not found after download'}
                 return
 
+            print(f'Audio ready: {os.path.getsize(actual_path)} bytes')
+
             if not ASSEMBLYAI_API_KEY:
-                jobs[job_id] = {'status': 'error', 'error': 'No AssemblyAI key'}
+                jobs[job_id] = {'status': 'error', 'error': 'No AssemblyAI key configured'}
                 return
 
             # Upload to AssemblyAI
@@ -127,7 +131,9 @@ def do_transcription(job_id, video_url, cookies):
                     headers={'authorization': ASSEMBLYAI_API_KEY},
                     data=f
                 )
+
             upload_url = upload_response.json()['upload_url']
+            print(f'Uploaded to AssemblyAI: {upload_url}')
 
             # Request transcription
             transcript_response = requests.post(
@@ -136,26 +142,59 @@ def do_transcription(job_id, video_url, cookies):
                 json={'audio_url': upload_url, 'language_code': 'en', 'punctuate': True}
             )
             transcript_id = transcript_response.json()['id']
+            print(f'Transcription started: {transcript_id}')
 
             # Poll AssemblyAI
-            for _ in range(40):
+            for i in range(40):
                 time.sleep(3)
                 poll = requests.get(
                     f'https://api.assemblyai.com/v2/transcript/{transcript_id}',
                     headers={'authorization': ASSEMBLYAI_API_KEY}
                 ).json()
 
+                print(f'Poll {i+1}: {poll["status"]}')
+
                 if poll['status'] == 'completed':
                     jobs[job_id] = {'status': 'done', 'transcript': poll['text']}
                     return
                 elif poll['status'] == 'error':
-                    jobs[job_id] = {'status': 'error', 'error': 'Transcription failed'}
+                    jobs[job_id] = {'status': 'error', 'error': 'AssemblyAI transcription failed'}
                     return
 
             jobs[job_id] = {'status': 'error', 'error': 'Transcription timed out'}
 
     except Exception as e:
+        print(f'Transcription error: {e}')
         jobs[job_id] = {'status': 'error', 'error': str(e)}
+
+
+def _download_with_ytdlp(video_url, audio_path, tmpdir, cookies):
+    cmd = [
+        'yt-dlp',
+        '--extract-audio',
+        '--audio-format', 'mp3',
+        '--audio-quality', '5',
+        '--output', audio_path,
+        '--no-playlist',
+        '--socket-timeout', '30',
+        '--max-filesize', '15m',
+        '--no-check-certificates',
+        '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    ]
+
+    if cookies:
+        cookies_path = os.path.join(tmpdir, 'cookies.txt')
+        with open(cookies_path, 'w') as f:
+            f.write('# Netscape HTTP Cookie File\n')
+            for pair in cookies.split('; '):
+                if '=' in pair:
+                    name, _, value = pair.partition('=')
+                    f.write(f'.youtube.com\tTRUE\t/\tFALSE\t0\t{name.strip()}\t{value.strip()}\n')
+        cmd.extend(['--cookies', cookies_path])
+
+    cmd.append(video_url)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+    print(f'yt-dlp exit: {result.returncode}, stderr: {result.stderr[:200]}')
 
 
 @app.route('/factcheck', methods=['POST'])
