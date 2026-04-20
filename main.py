@@ -103,12 +103,13 @@ def do_transcription(job_id, video_url, cookies):
 
         # Submit transcript request
         transcript_response = requests.post(
-            'https://api.assemblyai.com/v3/transcripts',
+            'https://api.assemblyai.com/v2/transcript',
             headers=headers,
             json={
                 'audio_url': video_url,
-                'speech_model': 'universal-2',
-                'language_code': 'en'
+                'language_code': 'en',
+                'punctuate': True,
+                'format_text': True
             }
         )
 
@@ -133,7 +134,7 @@ def do_transcription(job_id, video_url, cookies):
         for i in range(40):
             time.sleep(3)
             poll = requests.get(
-                f'https://api.assemblyai.com/v3/transcripts/{transcript_id}',
+                f'https://api.assemblyai.com/v2/transcript/{transcript_id}',
                 headers=headers
             ).json()
 
