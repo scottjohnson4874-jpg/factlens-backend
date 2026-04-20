@@ -1,4 +1,3 @@
-# v2
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import anthropic
@@ -16,18 +15,23 @@ app = Flask(__name__)
 CORS(app)
 
 ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
-ASSEMBLYAI_API_KEY = os.environ.get('ASSEMBLYAI_API_KEY', '')
+ASSEMBLYAI_API_KEY = os.environ.get('ASSEMBLYAI_API_KEY', '') or os.environ.get('assemblyai_api_key', '')
 
 # Store jobs in memory
 jobs = {}
 
 @app.route('/health', methods=['GET'])
 def health():
+    # Read directly from environ at request time
+    assemblyai_key = os.environ.get('ASSEMBLYAI_API_KEY', '')
+    anthropic_key = os.environ.get('ANTHROPIC_API_KEY', '')
+    all_keys = [k for k in os.environ.keys() if 'API' in k or 'KEY' in k]
     return jsonify({
         'status': 'ok',
         'service': 'FactLens Backend',
-        'assemblyai_key_set': bool(ASSEMBLYAI_API_KEY),
-        'assemblyai_key_length': len(ASSEMBLYAI_API_KEY)
+        'assemblyai_key_length': len(assemblyai_key),
+        'anthropic_key_length': len(anthropic_key),
+        'env_keys_with_api': all_keys
     })
 
 @app.route('/test-pytubefix', methods=['GET'])
