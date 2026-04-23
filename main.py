@@ -63,18 +63,16 @@ def do_transcription(job_id, video_url):
         print(f'Getting transcript for: {video_id}')
 
         from youtube_transcript_api import YouTubeTranscriptApi
-        from youtube_transcript_api.proxies import WebshareProxyConfig
 
-        WEBSHARE_API_KEY = os.environ.get('WEBSHARE_API_KEY', '')
-        print(f'WebShare key present: {bool(WEBSHARE_API_KEY)}')
+        # WebShare proxy credentials
+        proxy_user = os.environ.get('PROXY_USER', 'yjaztwpe')
+        proxy_pass = os.environ.get('PROXY_PASS', '5kbkztiemifw')
+        proxy_host = os.environ.get('PROXY_HOST', '31.59.20.176')
+        proxy_port = os.environ.get('PROXY_PORT', '6754')
 
-        if WEBSHARE_API_KEY:
-            print('Using WebShare proxy')
-            proxy_config = WebshareProxyConfig(proxy_list_url=f'https://proxy.webshare.io/api/v2/proxy/list/download/{WEBSHARE_API_KEY}/-/any/username/direct/-/')
-            ytt_api = YouTubeTranscriptApi(proxies=proxy_config)
-        else:
-            print('No proxy')
-            ytt_api = YouTubeTranscriptApi()
+        proxy_url = f'http://{proxy_user}:{proxy_pass}@{proxy_host}:{proxy_port}'
+        print(f'Using proxy: {proxy_host}:{proxy_port}')
+        ytt_api = YouTubeTranscriptApi(proxies={'http': proxy_url, 'https': proxy_url})
 
         fetched = ytt_api.fetch(video_id)
         transcript = ' '.join([snippet.text for snippet in fetched])
