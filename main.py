@@ -1,4 +1,4 @@
-# v8
+# v7
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
@@ -22,11 +22,14 @@ def transcribe_start():
         video_url = data.get('url', '')
         if not video_url:
             return jsonify({'error': 'No video URL provided'}), 400
+
         job_id = str(uuid.uuid4())[:8]
         jobs[job_id] = {'status': 'processing'}
+
         thread = threading.Thread(target=do_transcription, args=(job_id, video_url))
         thread.daemon = True
         thread.start()
+
         return jsonify({'job_id': job_id, 'status': 'processing'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -35,7 +38,9 @@ def transcribe_start():
 def transcribe_status(job_id):
     if job_id not in jobs:
         return jsonify({'error': 'Job not found'}), 404
+
     job = jobs[job_id]
+
     if job['status'] == 'done':
         transcript = job['transcript']
         del jobs[job_id]
@@ -53,12 +58,16 @@ def do_transcription(job_id, video_url):
         if not vid_match:
             jobs[job_id] = {'status': 'error', 'error': 'Could not extract video ID'}
             return
+
         video_id = vid_match.group(1)
         print(f'Getting transcript for: {video_id}')
+
         from youtube_transcript_api import YouTubeTranscriptApi
         from youtube_transcript_api.proxies import WebshareProxyConfig
+
         WEBSHARE_API_KEY = os.environ.get('WEBSHARE_API_KEY', '')
         print(f'WebShare key present: {bool(WEBSHARE_API_KEY)}')
+
         if WEBSHARE_API_KEY:
             print('Using WebShare proxy')
             proxy_config = WebshareProxyConfig(proxy_list_url=f'https://proxy.webshare.io/api/v2/proxy/list/download/{WEBSHARE_API_KEY}/-/any/username/direct/-/')
@@ -66,14 +75,18 @@ def do_transcription(job_id, video_url):
         else:
             print('No proxy')
             ytt_api = YouTubeTranscriptApi()
+
         fetched = ytt_api.fetch(video_id)
         transcript = ' '.join([snippet.text for snippet in fetched])
+
         print(f'Transcript length: {len(transcript)} chars')
         print(f'Preview: {transcript[:150]}')
+
         if len(transcript) > 50:
             jobs[job_id] = {'status': 'done', 'transcript': transcript}
         else:
             jobs[job_id] = {'status': 'error', 'error': 'Transcript too short'}
+
     except Exception as e:
         print(f'Transcription error: {e}')
         jobs[job_id] = {'status': 'error', 'error': str(e)}
